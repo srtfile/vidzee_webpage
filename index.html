@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vidzee Resolver</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.2.0/crypto-js.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;padding:2rem 1rem}
+  h1{font-size:1.5rem;font-weight:700;color:#a78bfa;margin-bottom:1.5rem;text-align:center}
+  .card{background:#1e2130;border:1px solid #2d3148;border-radius:12px;padding:1.5rem;max-width:750px;margin:0 auto}
+  .row{display:flex;gap:.5rem;margin-bottom:.75rem}
+  input{flex:1;padding:.75rem 1rem;border-radius:8px;border:1px solid #3d4163;background:#0f1117;color:#e2e8f0;font-size:.9rem}
+  input:focus{outline:none;border-color:#a78bfa}
+  .small-input{width:80px;flex:none}
+  button{padding:.75rem 1.25rem;border-radius:8px;border:none;background:#7c3aed;color:#fff;font-size:.95rem;font-weight:600;cursor:pointer}
+  button:hover{background:#6d28d9}
+  button:disabled{background:#3d4163;cursor:not-allowed}
+  .proxy-row{display:flex;align-items:center;gap:.5rem;margin-bottom:1rem;flex-wrap:wrap}
+  .proxy-row label{color:#94a3b8;font-size:.8rem}
+  .proxy-row select{padding:.4rem .6rem;border-radius:6px;border:1px solid #3d4163;background:#0f1117;color:#e2e8f0;font-size:.8rem}
+  .log{margin-top:1rem;background:#0a0a0f;border:1px solid #2d3148;border-radius:8px;padding:.75rem;font-size:.75rem;font-family:monospace;color:#64748b;max-height:120px;overflow-y:auto}
+  .log .ok{color:#6ee7b7} .log .err{color:#fca5a5} .log .info{color:#93c5fd}
+  .results{margin-top:1rem}
+  .stream{background:#0f1117;border:1px solid #2d3148;border-radius:8px;padding:1rem;margin-bottom:.75rem}
+  .stream-header{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem;flex-wrap:wrap}
+  .badge{font-size:.7rem;font-weight:700;padding:.2rem .5rem;border-radius:999px;background:#2d3148;color:#94a3b8;text-transform:uppercase}
+  .badge.hls{background:#064e3b;color:#6ee7b7}
+  .badge.mp4{background:#451a03;color:#fcd34d}
+  .badge.dash{background:#1e3a5f;color:#93c5fd}
+  .server-name{font-weight:600;color:#c4b5fd}
+  .url-row{display:flex;gap:.5rem;align-items:center}
+  .url-text{flex:1;font-size:.72rem;color:#94a3b8;word-break:break-all;font-family:monospace;padding:.5rem;background:#1e2130;border-radius:4px;border:1px solid #2d3148}
+  .copy-btn{flex-shrink:0;padding:.4rem .75rem;border-radius:6px;border:none;background:#2d3148;color:#e2e8f0;font-size:.75rem;cursor:pointer}
+  .copy-btn:hover{background:#3d4163}
+  .copy-btn.copied{background:#064e3b;color:#6ee7b7}
+  .meta{text-align:center;color:#475569;font-size:.75rem;margin-top:.75rem}
+  .empty{text-align:center;color:#475569;padding:1rem}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🎬 Vidzee Resolver</h1>
+
+  <div class="row">
+    <input id="url" type="text" placeholder="https://player.vidzee.wtf/embed/movie/254" value="https://player.vidzee.wtf/embed/movie/254">
+  </div>
+  <div class="row">
+    <input id="season"  class="small-input" type="number" placeholder="Season" min="1">
+    <input id="episode" class="small-input" type="number" placeholder="Ep" min="1">
+    <button id="btn" onclick="resolveAll()">Extract All Servers</button>
+  </div>
+
+  <div class="proxy-row">
+    <label>CORS Proxy:</label>
+    <select id="proxySelect">
+      <option value="auto">Auto (fallback chain)</option>
+      <option value="corsproxy">corsproxy.io</option>
+      <option value="allorigins">allorigins.win</option>
+      <option value="codetabs">codetabs.com</option>
+      <option value="direct">Direct (may fail)</option>
+    </select>
+  </div>
+
+  <div class="log" id="log"><span class="info">Ready.</span></div>
+  <div class="results" id="results"></div>
+</div>
+
+<script>
+// ── constants ────────────────────────────────────────────────────────────────
+const STATIC_SECRET = "c4a8f1d7e2b9a6c3d0f5e8a1b7c4d9e2";
+const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36";
+
+const SERVERS = [
+  {sr:"0", name:"Tcloud",   flag:"US", lang:"English"},
+  {sr:"1", name:"IpCloud",  flag:"US", lang:"English"},
+  {sr:"2", name:"Achilles", flag:"US", lang:"English"},
+  {sr:"3", name:"Nflix",    flag:"US", lang:"English"},
+  {sr:"4", name:"Drag",     flag:"US", lang:"English"},
+  {sr:"5", name:"Viet",     flag:"VN", lang:"Vietnamese"},
+  {sr:"6", name:"Hindi",    flag:"IN", lang:"Hindi"},
+  {sr:"7", name:"Hindi_v2", flag:"IN", lang:"Hindi"},
+];
+
+// CORS proxy wrappers — each returns the response text or throws
+const PROXY_CHAIN = [
+  async (url) => {
+    const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
+    if (!r.ok) throw new Error(`corsproxy.io ${r.status}`);
+    return r.text();
+  },
+  async (url) => {
+    const r = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`);
+    if (!r.ok) throw new Error(`allorigins ${r.status}`);
+    return r.text();
+  },
+  async (url) => {
+    const r = await fetch(`https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`);
+    if (!r.ok) throw new Error(`codetabs ${r.status}`);
+    return r.text();
+  },
+  async (url) => {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`direct ${r.status}`);
+    return r.text();
+  },
+];
+
+const PROXY_MAP = {
+  corsproxy:  [PROXY_CHAIN[0]],
+  allorigins: [PROXY_CHAIN[1]],
+  codetabs:   [PROXY_CHAIN[2]],
+  direct:     [PROXY_CHAIN[3]],
+  auto:       PROXY_CHAIN,
+};
+
+// ── logging ──────────────────────────────────────────────────────────────────
+function log(msg, cls="info") {
+  const el = document.getElementById("log");
+  el.innerHTML += `\n<span class="${cls}">${esc(msg)}</span>`;
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── fetch with proxy fallback ─────────────────────────────────────────────────
+async function proxyFetch(url) {
+  const mode   = document.getElementById("proxySelect").value;
+  const chain  = PROXY_MAP[mode] || PROXY_CHAIN;
+  let lastErr;
+  for (const fn of chain) {
+    try {
+      return await fn(url);
+    } catch(e) {
+      lastErr = e;
+      log(`proxy fail: ${e.message} — trying next…`, "err");
+    }
+  }
+  throw lastErr;
+}
+
+// ── crypto ───────────────────────────────────────────────────────────────────
+function decryptApiKey(encryptedB64) {
+  // AES-GCM: first 12 bytes = nonce, next 16 = tag, rest = ciphertext
+  // CryptoJS doesn't support GCM natively → use SubtleCrypto
+  const raw      = Uint8Array.from(atob(encryptedB64.trim()), c => c.charCodeAt(0));
+  const nonce    = raw.slice(0, 12);
+  const tag      = raw.slice(12, 28);
+  const cipher   = raw.slice(28);
+  // SubtleCrypto expects ciphertext + tag concatenated
+  const ctWithTag = new Uint8Array([...cipher, ...tag]);
+
+  // Derive key: SHA-256 of static secret
+  return crypto.subtle.digest("SHA-256", new TextEncoder().encode(STATIC_SECRET))
+    .then(keyBuf => crypto.subtle.importKey("raw", keyBuf, {name:"AES-GCM"}, false, ["decrypt"]))
+    .then(key    => crypto.subtle.decrypt({name:"AES-GCM", iv:nonce}, key, ctWithTag))
+    .then(plain  => new TextDecoder().decode(plain));
+}
+
+function decryptLink(encLink, runtimeKey) {
+  // base64 → "iv_b64:ct_b64" → AES-CBC decrypt
+  const decoded  = atob(encLink);
+  const [ivB64, ctB64] = decoded.split(":");
+  const keyBytes = runtimeKey.slice(0, 32).padEnd(32, "\0");
+  const key      = CryptoJS.enc.Utf8.parse(keyBytes);
+  const iv       = CryptoJS.enc.Base64.parse(ivB64);
+  const ct       = CryptoJS.enc.Base64.parse(ctB64);
+  const dec      = CryptoJS.AES.decrypt({ciphertext: ct}, key, {
+    iv, mode: CryptoJS.mode.CBC, padding: CryptoJS.pad.Pkcs7
+  });
+  return dec.toString(CryptoJS.enc.Utf8);
+}
+
+// ── main resolver ─────────────────────────────────────────────────────────────
+async function resolveAll() {
+  const embedUrl = document.getElementById("url").value.trim();
+  const season   = document.getElementById("season").value.trim();
+  const episode  = document.getElementById("episode").value.trim();
+  if (!embedUrl) return;
+
+  const m = embedUrl.match(/\/embed\/(\w+)\/(\d+)/);
+  if (!m) { log("Invalid embed URL", "err"); return; }
+  const [, mediaType, mediaId] = m;
+
+  document.getElementById("btn").disabled = true;
+  document.getElementById("log").innerHTML = "";
+  document.getElementById("results").innerHTML = "";
+
+  const t0 = Date.now();
+  let runtimeKey;
+
+  // 1. Get runtime API key
+  try {
+    log("Fetching runtime API key…");
+    const raw = await proxyFetch("https://core.vidzee.wtf/api-key");
+    runtimeKey = await decryptApiKey(raw.replace(/\s+/g, ""));
+    log(`API key OK: ${runtimeKey.slice(0,8)}…`, "ok");
+  } catch(e) {
+    log(`API key failed: ${e}`, "err");
+    document.getElementById("btn").disabled = false;
+    return;
+  }
+
+  // 2. Loop all servers
+  const streams = [];
+  const seen    = new Set();
+
+  for (const srv of SERVERS) {
+    let apiUrl = `https://player.vidzee.wtf/api/server?id=${encodeURIComponent(mediaId)}&sr=${srv.sr}`;
+    if (season && episode) apiUrl += `&ss=${season}&ep=${episode}`;
+
+    try {
+      log(`[${srv.name}] fetching…`);
+      const text = await proxyFetch(apiUrl);
+      const payload = JSON.parse(text);
+
+      if (payload?.error) {
+        log(`[${srv.name}] server error: ${payload.error}`, "err");
+        continue;
+      }
+
+      let found = 0;
+      for (const item of (payload?.url || [])) {
+        const enc = item?.link;
+        if (!enc) continue;
+        try {
+          const dec = decryptLink(enc, runtimeKey);
+          if (!dec || seen.has(dec)) continue;
+          seen.add(dec);
+          streams.push({server: srv.name, flag: srv.flag, lang: srv.lang, url: dec});
+          found++;
+        } catch(e) {
+          log(`[${srv.name}] decrypt fail: ${e.message}`, "err");
+        }
+      }
+      if (found) log(`[${srv.name}] ✓ ${found} stream(s)`, "ok");
+      else       log(`[${srv.name}] no streams`, "err");
+
+    } catch(e) {
+      log(`[${srv.name}] failed: ${e.message}`, "err");
+    }
+  }
+
+  // 3. Render results
+  const elapsed = Date.now() - t0;
+  renderResults(streams, elapsed);
+  document.getElementById("btn").disabled = false;
+}
+
+function renderResults(streams, elapsed) {
+  const out = document.getElementById("results");
+  if (!streams.length) {
+    out.innerHTML = '<div class="empty">No streams found.</div>';
+    return;
+  }
+  let html = "";
+  for (const s of streams) {
+    const kind = s.url.includes(".m3u8") ? "hls" : s.url.includes(".mpd") ? "dash" : "mp4";
+    html += `<div class="stream">
+      <div class="stream-header">
+        <span class="server-name">${esc(s.server)}</span>
+        <span class="badge ${kind}">${kind.toUpperCase()}</span>
+        <span class="badge">${esc(s.flag)}</span>
+        <span class="lang" style="color:#64748b;font-size:.8rem">${esc(s.lang)}</span>
+      </div>
+      <div class="url-row">
+        <div class="url-text">${esc(s.url)}</div>
+        <button class="copy-btn" onclick="copyUrl(this,'${escAttr(s.url)}')">Copy</button>
+      </div>
+    </div>`;
+  }
+  html += `<div class="meta">${streams.length} stream(s) · ${elapsed}ms</div>`;
+  out.innerHTML = html;
+}
+
+function copyUrl(btn, url) {
+  navigator.clipboard.writeText(url).then(() => {
+    btn.textContent = "Copied!";
+    btn.classList.add("copied");
+    setTimeout(() => { btn.textContent = "Copy"; btn.classList.remove("copied"); }, 1500);
+  });
+}
+
+function esc(s)     { return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+function escAttr(s) { return String(s).replace(/'/g,"\\'"); }
+
+document.getElementById("url").addEventListener("keydown", e => { if (e.key === "Enter") resolveAll(); });
+</script>
+</body>
+</html>
