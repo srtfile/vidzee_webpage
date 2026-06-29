@@ -56,6 +56,7 @@
     <label>CORS Proxy:</label>
     <select id="proxySelect">
       <option value="auto">Auto (fallback chain)</option>
+      <option value="vixsrcproxy">vixsrcproxy (workers.dev)</option>
       <option value="corsproxy">corsproxy.io</option>
       <option value="allorigins">allorigins.win</option>
       <option value="codetabs">codetabs.com</option>
@@ -86,6 +87,11 @@ const SERVERS = [
 // CORS proxy wrappers — each returns the response text or throws
 const PROXY_CHAIN = [
   async (url) => {
+    const r = await fetch(`https://vixsrcproxy.khantara922.workers.dev/?url=${encodeURIComponent(url)}`);
+    if (!r.ok) throw new Error(`vixsrcproxy ${r.status}`);
+    return r.text();
+  },
+  async (url) => {
     const r = await fetch(`https://corsproxy.io/?${encodeURIComponent(url)}`);
     if (!r.ok) throw new Error(`corsproxy.io ${r.status}`);
     return r.text();
@@ -108,11 +114,12 @@ const PROXY_CHAIN = [
 ];
 
 const PROXY_MAP = {
-  corsproxy:  [PROXY_CHAIN[0]],
-  allorigins: [PROXY_CHAIN[1]],
-  codetabs:   [PROXY_CHAIN[2]],
-  direct:     [PROXY_CHAIN[3]],
-  auto:       PROXY_CHAIN,
+  vixsrcproxy: [PROXY_CHAIN[0]],
+  corsproxy:   [PROXY_CHAIN[1]],
+  allorigins:  [PROXY_CHAIN[2]],
+  codetabs:    [PROXY_CHAIN[3]],
+  direct:      [PROXY_CHAIN[4]],
+  auto:        PROXY_CHAIN,
 };
 
 // ── logging ──────────────────────────────────────────────────────────────────
@@ -141,15 +148,12 @@ async function proxyFetch(url) {
 // ── crypto ───────────────────────────────────────────────────────────────────
 function decryptApiKey(encryptedB64) {
   // AES-GCM: first 12 bytes = nonce, next 16 = tag, rest = ciphertext
-  // CryptoJS doesn't support GCM natively → use SubtleCrypto
   const raw      = Uint8Array.from(atob(encryptedB64.trim()), c => c.charCodeAt(0));
   const nonce    = raw.slice(0, 12);
   const tag      = raw.slice(12, 28);
   const cipher   = raw.slice(28);
-  // SubtleCrypto expects ciphertext + tag concatenated
   const ctWithTag = new Uint8Array([...cipher, ...tag]);
 
-  // Derive key: SHA-256 of static secret
   return crypto.subtle.digest("SHA-256", new TextEncoder().encode(STATIC_SECRET))
     .then(keyBuf => crypto.subtle.importKey("raw", keyBuf, {name:"AES-GCM"}, false, ["decrypt"]))
     .then(key    => crypto.subtle.decrypt({name:"AES-GCM", iv:nonce}, key, ctWithTag))
@@ -157,7 +161,6 @@ function decryptApiKey(encryptedB64) {
 }
 
 function decryptLink(encLink, runtimeKey) {
-  // base64 → "iv_b64:ct_b64" → AES-CBC decrypt
   const decoded  = atob(encLink);
   const [ivB64, ctB64] = decoded.split(":");
   const keyBytes = runtimeKey.slice(0, 32).padEnd(32, "\0");
